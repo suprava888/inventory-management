@@ -1,9 +1,12 @@
-import axios from 'axios';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  getCategories, createCategory, updateCategory, deleteCategory,
+  getItems, createItem, updateItem, deleteItem,
+} from './supabase';
 
 const emptyItem = { name: '', category_id: '', quantity: 0, price: 0, sku: '', status: 'In Stock' };
 
-// ── Toast hook ──────────────────────────────────────────────────────────────
+// ── Toast ─────────────────────────────────────────────────────────────────────
 function useToast() {
   const [toasts, setToasts] = useState([]);
   const push = useCallback((msg, type = 'success') => {
@@ -14,7 +17,7 @@ function useToast() {
   return { toasts, push };
 }
 
-// ── Status badge ────────────────────────────────────────────────────────────
+// ── Status badge ──────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
   const cls =
     status === 'In Stock' ? 'badge badge-in-stock' :
@@ -24,7 +27,7 @@ function StatusBadge({ status }) {
   return <span className={cls}>{status}</span>;
 }
 
-// ── Main App ─────────────────────────────────────────────────────────────────
+// ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [items, setItems] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -40,24 +43,24 @@ export default function App() {
   const { toasts, push } = useToast();
   const formRef = useRef(null);
 
-  // ── Load data ──────────────────────────────────────────────────────────────
+  // ── Load ───────────────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [itemsRes, categoriesRes] = await Promise.all([
-        axios.get('/api/items', {
-          params: {
-            q: query || undefined,
-            category_id: selectedCategory === 'all' ? undefined : Number(selectedCategory),
-          },
-        }),
-        axios.get('/api/categories'),
+      const [rawItems, cats] = await Promise.all([
+        getItems(query || null, selectedCategory === 'all' ? null : selectedCategory),
+        getCategories(),
       ]);
-      setItems(itemsRes.data);
-      setCategories(categoriesRes.data);
-    } catch {
-      setError('Failed to load data. Check if the backend is running.');
+      // Flatten joined category name
+      const mapped = rawItems.map(item => ({
+        ...item,
+        category_name: item.categories?.name || null,
+      }));
+      setItems(mapped);
+      setCategories(cats);
+    } catch (e) {
+      setError('Failed to load data: ' + e.message);
     } finally {
       setLoading(false);
     }
@@ -80,23 +83,24 @@ export default function App() {
     setSaving(true);
     try {
       const payload = {
-        ...form,
+        name: form.name,
         category_id: form.category_id ? Number(form.category_id) : null,
         quantity: Number(form.quantity),
         price: Number(form.price),
+        sku: form.sku || null,
+        status: form.status,
       };
       if (editingId) {
-        await axios.put(`/api/items/${editingId}`, payload);
-        push('Item updated successfully');
+        await updateItem(editingId, payload);
+        push('Item updated');
       } else {
-        await axios.post('/api/items', payload);
-        push('Item added successfully');
+        await createItem(payload);
+        push('Item added');
       }
       resetForm();
       await loadData();
-    } catch (err) {
-      const detail = err.response?.data?.detail || 'Failed to save item';
-      push(detail, 'error');
+    } catch (e) {
+      push(e.message || 'Failed to save item', 'error');
     } finally {
       setSaving(false);
     }
@@ -115,14 +119,14 @@ export default function App() {
     formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
-  const deleteItem = async (itemId, itemName) => {
-    if (!window.confirm(`Delete "${itemName}"?`)) return;
+  const handleDeleteItem = async (id, name) => {
+    if (!window.confirm(`Delete "${name}"?`)) return;
     try {
-      await axios.delete(`/api/items/${itemId}`);
+      await deleteItem(id);
       push('Item deleted');
       await loadData();
-    } catch {
-      push('Failed to delete item', 'error');
+    } catch (e) {
+      push(e.message || 'Failed to delete', 'error');
     }
   };
 
@@ -132,18 +136,17 @@ export default function App() {
     setSaving(true);
     try {
       if (editingCategoryId) {
-        await axios.put(`/api/categories/${editingCategoryId}`, categoryForm);
+        await updateCategory(editingCategoryId, categoryForm);
         push('Category updated');
       } else {
-        await axios.post('/api/categories', categoryForm);
+        await createCategory(categoryForm);
         push('Category created');
       }
       setCategoryForm({ name: '', description: '' });
       setEditingCategoryId(null);
       await loadData();
-    } catch (err) {
-      const detail = err.response?.data?.detail || 'Failed to save category';
-      push(detail, 'error');
+    } catch (e) {
+      push(e.message || 'Failed to save category', 'error');
     } finally {
       setSaving(false);
     }
@@ -154,21 +157,20 @@ export default function App() {
     setCategoryForm({ name: cat.name, description: cat.description || '' });
   };
 
-  const deleteCategory = async (catId, catName) => {
-    if (!window.confirm(`Delete category "${catName}"? Items in this category will become uncategorized.`)) return;
+  const handleDeleteCategory = async (id, name) => {
+    if (!window.confirm(`Delete category "${name}"? Items will become uncategorized.`)) return;
     try {
-      await axios.delete(`/api/categories/${catId}`);
+      await deleteCategory(id);
       push('Category deleted');
       await loadData();
-    } catch {
-      push('Failed to delete category', 'error');
+    } catch (e) {
+      push(e.message || 'Failed to delete', 'error');
     }
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* Toast notifications */}
       <div className="toast-container">
         {toasts.map(t => (
           <div key={t.id} className={`toast toast-${t.type}`}>{t.msg}</div>
@@ -176,7 +178,7 @@ export default function App() {
       </div>
 
       <main className="page">
-        {/* ── Left panel: forms ── */}
+        {/* Left panel */}
         <section className="panel">
           <h1 style={{ margin: '0 0 4px 0', fontSize: '1.4rem' }}>Inventory Management</h1>
           <p style={{ margin: '0 0 16px 0', color: '#64748b', fontSize: '0.88rem' }}>
@@ -186,16 +188,13 @@ export default function App() {
           {/* Stats */}
           <div className="stats-grid">
             <article className="card stat-card">
-              <strong>{stats.totalUnits}</strong>
-              <span>Total units</span>
+              <strong>{stats.totalUnits}</strong><span>Total units</span>
             </article>
             <article className="card stat-card">
-              <strong>{stats.categories}</strong>
-              <span>Categories</span>
+              <strong>{stats.categories}</strong><span>Categories</span>
             </article>
             <article className="card stat-card">
-              <strong>${stats.stockValue.toFixed(2)}</strong>
-              <span>Stock value</span>
+              <strong>${stats.stockValue.toFixed(2)}</strong><span>Stock value</span>
             </article>
           </div>
 
@@ -221,19 +220,19 @@ export default function App() {
                   {editingCategoryId ? 'Update category' : 'Create category'}
                 </button>
                 {editingCategoryId && (
-                  <button type="button" className="secondary" onClick={() => { setEditingCategoryId(null); setCategoryForm({ name: '', description: '' }); }}>
-                    Cancel
-                  </button>
+                  <button type="button" className="secondary" onClick={() => {
+                    setEditingCategoryId(null);
+                    setCategoryForm({ name: '', description: '' });
+                  }}>Cancel</button>
                 )}
               </div>
             </form>
-
             <div className="chip-list">
               {categories.map(cat => (
                 <span key={cat.id} className="chip">
                   {cat.name}
                   <button type="button" className="chip-btn" onClick={() => startCategoryEdit(cat)}>Edit</button>
-                  <button type="button" className="chip-btn danger" onClick={() => deleteCategory(cat.id, cat.name)}>✕</button>
+                  <button type="button" className="chip-btn danger" onClick={() => handleDeleteCategory(cat.id, cat.name)}>✕</button>
                 </span>
               ))}
             </div>
@@ -262,16 +261,13 @@ export default function App() {
               ))}
             </select>
             <input
-              type="number"
-              min="0"
+              type="number" min="0"
               value={form.quantity}
               onChange={e => setForm({ ...form, quantity: e.target.value })}
               placeholder="Quantity"
             />
             <input
-              type="number"
-              step="0.01"
-              min="0"
+              type="number" step="0.01" min="0"
               value={form.price}
               onChange={e => setForm({ ...form, price: e.target.value })}
               placeholder="Price"
@@ -292,7 +288,7 @@ export default function App() {
           </form>
         </section>
 
-        {/* ── Right panel: items list ── */}
+        {/* Right panel */}
         <section className="panel">
           <div className="toolbar">
             <h2 style={{ margin: 0, fontSize: '1.1rem' }}>
@@ -347,7 +343,7 @@ export default function App() {
                   </p>
                   <div className="button-row">
                     <button type="button" className="secondary" onClick={() => startEdit(item)}>Edit</button>
-                    <button type="button" className="danger" onClick={() => deleteItem(item.id, item.name)}>Delete</button>
+                    <button type="button" className="danger" onClick={() => handleDeleteItem(item.id, item.name)}>Delete</button>
                   </div>
                 </article>
               ))}
